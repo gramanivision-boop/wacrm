@@ -10,10 +10,18 @@ import {
 import { applyInboxFilter, type InboxFilter } from "@/lib/inbox/inbox-filters";
 import { cn } from "@/lib/utils";
 import type { Conversation, ConversationStatus, Tag } from "@/types";
-import { Search, ChevronDown, X } from "lucide-react";
+import { Search, ChevronDown, X, Plus, Send, Loader2 } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { useTranslations } from "next-intl";
 import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
@@ -36,6 +44,8 @@ interface ConversationListProps {
    */
   resyncToken?: number;
   initialFilter?: InboxFilter;
+  /** Called with the newly created conversation after "New Conversation" succeeds. */
+  onNewConversation?: (conversation: Conversation) => void;
 }
 
 const STATUS_COLORS: Record<ConversationStatus, string> = {
@@ -52,8 +62,73 @@ export function ConversationList({
   onConversationsLoaded,
   resyncToken = 0,
   initialFilter = "all",
+  onNewConversation,
 }: ConversationListProps) {
   const t = useTranslations("Inbox.conversationList");
+
+  // ---- New Conversation modal state -----------------------------------
+  const [showNewConv, setShowNewConv] = useState(false);
+  const [newPhone, setNewPhone] = useState("");
+  const [newMessage, setNewMessage] = useState("");
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
+
+  const handleSendNewConversation = useCallback(async () => {
+    const phone = newPhone.trim();
+    const text = newMessage.trim();
+    if (!phone || !text) return;
+    setSending(true);
+    setSendError(null);
+    try {
+      const supabase = createClient();
+      // Get the API key for this account
+      const { data: keyRow } = await supabase
+        .from("api_keys")
+        .select("key")
+        .limit(1)
+        .single();
+      if (!keyRow?.key) throw new Error("API key not found. Please check Settings → API Keys.");
+
+      const res = await fetch("/api/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${keyRow.key}`,
+        },
+        body: JSON.stringify({
+          to: phone,
+          type: "text",
+          text,
+          name: phone, // contact name fallback = phone until they reply
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json?.error?.message ?? "Failed to send");
+
+      // Fetch the new conversation and pass it up
+      const convId = json?.data?.conversation_id;
+      if (convId && onNewConversation) {
+        const { data: convData } = await supabase
+          .from("conversations")
+          .select(CONVERSATION_SELECT)
+          .eq("id", convId)
+          .single();
+        if (convData) {
+          const [normalized] = normalizeConversations([convData]);
+          if (normalized) onNewConversation(normalized);
+        }
+      }
+
+      setShowNewConv(false);
+      setNewPhone("");
+      setNewMessage("");
+    } catch (err: unknown) {
+      setSendError(err instanceof Error ? err.message : "Something went wrong");
+    } finally {
+      setSending(false);
+    }
+  }, [newPhone, newMessage, onNewConversation]);
+  // ---------------------------------------------------------------------
   
   const FILTER_OPTIONS: { label: string; value: InboxFilter }[] = useMemo(() => [
     { label: t("filterAll"), value: "all" },
@@ -227,16 +302,82 @@ export function ConversationList({
     // the single pane showing; fixed 320px on desktop where it shares the
     // row with the thread + contact sidebar.
     <div className="flex h-full w-full flex-col border-r border-border bg-card lg:w-80">
+      {/* New Conversation Modal */}
+      <Dialog open={showNewConv} onOpenChange={setShowNewConv}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>New Conversation</DialogTitle>
+            <DialogDescription>
+              Enter phone number (with country code) and message to start a new WhatsApp conversation.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-3 pt-2">
+            <div>
+              <label className="mb-1 block text-xs font-medium text-muted-foreground">
+                Phone Number (e.g. +919876543210)
+              </label>
+              <Input
+                placeholder="+91XXXXXXXXXX"
+                value={newPhone}
+                onChange={(e) => setNewPhone(e.target.value)}
+                disabled={sending}
+                type="tel"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-medium text-muted-foreground">
+                Message
+              </label>
+              <textarea
+                placeholder="Type your message here..."
+                value={newMessage}
+                onChange={(e) => setNewMessage(e.target.value)}
+                disabled={sending}
+                rows={4}
+                className="w-full rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground placeholder-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-50"
+              />
+            </div>
+            {sendError && (
+              <p className="text-xs text-destructive">{sendError}</p>
+            )}
+            <Button
+              onClick={handleSendNewConversation}
+              disabled={sending || !newPhone.trim() || !newMessage.trim()}
+              className="w-full"
+            >
+              {sending ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <Send className="mr-2 h-4 w-4" />
+              )}
+              {sending ? "Sending..." : "Send Message"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       {/* Search + Filter */}
       <div className="space-y-2 border-b border-border p-3">
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-          <Input
-            value={search}
-            onChange={handleSearchChange}
-            placeholder={t("searchPlaceholder")}
-            className="border-border bg-muted pl-9 text-sm text-foreground placeholder-muted-foreground focus:border-primary/50"
-          />
+        <div className="flex items-center gap-2">
+          <div className="relative flex-1">
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={search}
+              onChange={handleSearchChange}
+              placeholder={t("searchPlaceholder")}
+              className="border-border bg-muted pl-9 text-sm text-foreground placeholder-muted-foreground focus:border-primary/50"
+            />
+          </div>
+          {/* New Conversation Button */}
+          <Button
+            size="icon"
+            variant="outline"
+            className="shrink-0"
+            onClick={() => { setShowNewConv(true); setSendError(null); }}
+            title="New Conversation"
+          >
+            <Plus className="h-4 w-4" />
+          </Button>
         </div>
 
         <div className="flex flex-wrap items-center gap-1">

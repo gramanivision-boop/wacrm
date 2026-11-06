@@ -595,6 +595,7 @@ function InboxPageInner() {
             onConversationsLoaded={handleConversationsLoaded}
             resyncToken={resyncToken}
             initialFilter={parseInboxFilter(searchParams.get("filter"))}
+            onNewConversation={handleSelectConversation}
           />
         </div>
 
